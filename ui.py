@@ -4,6 +4,8 @@ Tkinter 图形界面模块：输入区、算法选择区、控制区、甘特图
 界面本身不实现调度算法，全部调度计算交给 scheduler.py，
 本模块只负责：收集输入 -> 调用算法 -> 在 Canvas 上绘图 -> 展示结果。
 """
+import math   # 用于 math.isfinite：拦截 "nan"、"inf" 这类能转 float 但非法的输入
+
 import tkinter as tk
 from tkinter import ttk, messagebox
 
@@ -184,26 +186,62 @@ class SchedulerApp:
     # ------------------------------------------------------------------
 
     def add_process(self):
-        """读取输入框并校验，把新进程加入列表并实时显示在表格中。"""
+        """读取输入框并校验，把新进程加入列表并实时显示在表格中。
+
+        校验顺序（全部通过才允许添加，任何一项失败都会用
+        messagebox.showerror 弹出红色错误提示框并立即拦截）：
+        1. 进程ID不能为空（不再自动编号）；
+        2. 到达时间/服务时间不能留空，且必须是有效数字；
+        3. 到达时间/服务时间不能为负数，服务时间还必须大于 0；
+        4. 进程ID不能与已添加的进程重复。
+        """
+        # ---- 第 1 步：读取三个输入框的内容，并去掉首尾空白字符 ----
         pid = self.pid_entry.get().strip()
+        arrival_text = self.arrival_entry.get().strip()
+        service_text = self.service_entry.get().strip()
+
+        # ---- 第 2 步：进程ID 为空 → 红色错误弹窗并拦截 ----
+        if not pid:
+            messagebox.showerror("输入错误", "进程ID不能为空，请输入进程标识！")
+            return
+
+        # ---- 第 3 步：到达时间/服务时间 留空或含非数字字符 → 弹窗拦截 ----
+        # float() 无法解析空字符串、纯字母（如 "abc"）等非法内容，
+        # 会抛出 ValueError，这里统一捕获并提示用户输入有效数字。
         try:
-            arrival = float(self.arrival_entry.get().strip())
-            service = float(self.service_entry.get().strip())
+            arrival = float(arrival_text)
+            service = float(service_text)
         except ValueError:
-            messagebox.showerror("输入错误", "到达时间和服务时间必须是数字！")
+            messagebox.showerror("输入错误",
+                                 "请输入有效的数字！到达时间和服务时间必须是数字！")
             return
+
+        # ---- 第 4 步：拦截 "nan"、"inf" 这类特殊输入 ----
+        # 它们能通过 float() 转换不报错，但不是合法的调度时间，
+        # 会让后续排序/绘图出现异常，因此用 math.isfinite 提前挡掉。
+        if not (math.isfinite(arrival) and math.isfinite(service)):
+            messagebox.showerror("输入错误", "请输入有效的数字！")
+            return
+
+        # ---- 第 5 步：负数拦截（时间轴从 0 开始，负时间没有物理意义） ----
         if arrival < 0:
-            messagebox.showerror("输入错误", "到达时间不能小于 0！")
+            messagebox.showerror("输入错误", "到达时间不能为负数，请输入有效的数字！")
             return
-        if service <= 0:
+        if service < 0:
+            messagebox.showerror("输入错误", "服务时间不能为负数，请输入有效的数字！")
+            return
+
+        # ---- 第 6 步：服务时间为 0 的进程没有工作量，同样拦截 ----
+        if service == 0:
             messagebox.showerror("输入错误", "服务时间必须大于 0！")
             return
-        if not pid:
-            pid = f"P{len(self.processes) + 1}"   # 没填 PID 时自动编号
+
+        # ---- 第 7 步：进程ID 查重，防止同名进程干扰调度统计 ----
         if any(p.pid == pid for p in self.processes):
             messagebox.showerror("输入错误", f"进程 {pid} 已存在，请换一个标识！")
             return
 
+        # ---- 全部校验通过：创建进程对象并加入内部列表 ----
         proc = Process(pid=pid, arrival=arrival, service=service, index=self._seq)
         self._seq += 1
         self.processes.append(proc)
@@ -213,28 +251,36 @@ class SchedulerApp:
             self.pid_color[pid] = COLORS[self._color_i % len(COLORS)]
             self._color_i += 1
 
+        # 把新进程插入"已添加进程"表格，实现列表实时刷新
         iid = str(proc.index)
         self.proc_by_iid[iid] = proc
         self.process_tree.insert("", "end", iid=iid,
                                  values=(pid, f"{arrival:g}", f"{service:g}"))
-        # 清空输入框，便于连续录入
+
+        # ---- 添加成功后自动清空三个输入框，方便连续录入下一个进程 ----
         self.pid_entry.delete(0, "end")
         self.arrival_entry.delete(0, "end")
         self.service_entry.delete(0, "end")
-        self.pid_entry.focus_set()
-        self._clear_outputs()   # 进程列表变化后，旧模拟结果作废
+        self.pid_entry.focus_set()   # 焦点自动回到 PID 输入框
+
+        # 进程列表发生变化，旧的模拟结果作废，清空甘特图与结果表
+        self._clear_outputs()
 
     def delete_process(self):
-        """删除列表中选中的进程。"""
+        """删除列表中选中的进程（支持多选，逐行准确删除）。"""
         selection = self.process_tree.selection()
+        # 未选中任何行 → 弹窗提示，不执行任何删除操作
         if not selection:
-            messagebox.showinfo("提示", "请先在列表中单击选中要删除的进程！")
+            messagebox.showwarning("提示", "请先选择要删除的进程！")
             return
+        # 遍历所有选中的行号：同步移除 Treeview 中的行、
+        # 行号映射表（proc_by_iid）以及内部进程列表，保证三处数据一致
         for iid in selection:
             proc = self.proc_by_iid.pop(iid, None)
             if proc is not None and proc in self.processes:
                 self.processes.remove(proc)
             self.process_tree.delete(iid)
+        # 进程列表变化后，旧的模拟结果作废
         self._clear_outputs()
 
     def _current_algorithm(self):
@@ -377,7 +423,15 @@ class SchedulerApp:
         return 10
 
     def fill_results(self, result):
-        """把模拟结果填入结果表，并更新平均值标签。"""
+        """把模拟结果填入结果表，并更新平均值标签。
+
+        Bug 修复：每次填充前先清空结果表中已有的全部行，
+        保证连续多次点击"开始模拟"时，底部结果区不会不断追加旧数据。
+        """
+        # ---- 先清空结果表旧行，再插入本次模拟的新数据 ----
+        for iid in self.result_tree.get_children():
+            self.result_tree.delete(iid)
+
         for r in result.results:
             self.result_tree.insert("", "end", values=(
                 r.pid,
