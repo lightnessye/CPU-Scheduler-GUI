@@ -3,8 +3,14 @@
 
 本模块不依赖任何界面库，只负责调度计算，可单独运行测试。
 每个算法都返回 SimulationResult，其中：
-    segments  —— 甘特图时间段（含 CPU 空闲段），供界面绘图；
-    results   —— 每个进程的等待时间、周转时间等统计。
+    segments        —— 甘特图时间段（含 CPU 空闲段），供界面绘图；
+    results         —— 每个进程的完成/周转/带权周转/等待时间统计；
+    avg_* 字段      —— 各指标的平均值。
+
+指标定义（按《计算机操作系统》教材约定）：
+    周转时间     = 完成时间 - 到达时间
+    带权周转时间 = 周转时间 / 服务时间（值越小说明进程等待的"性价比"越高）
+    等待时间     = 周转时间 - 服务时间（进程在就绪队列中等待 CPU 的总时长）
 """
 from collections import deque
 from dataclasses import dataclass, field
@@ -39,13 +45,21 @@ class GanttSegment:
 
 @dataclass
 class ProcessResult:
-    """单个进程的调度统计结果。"""
+    """单个进程的调度统计结果。
+
+    各指标推演步骤：
+        完成时间       = 进程最后一次执行结束的时刻
+        周转时间       = 完成时间 - 到达时间
+        带权周转时间   = 周转时间 / 服务时间
+        等待时间       = 周转时间 - 服务时间
+    """
     pid: str
     arrival: float
     service: float
-    finish: float      # 完成时间
-    waiting: float     # 等待时间 = 完成时间 - 到达时间 - 服务时间
-    turnaround: float  # 周转时间 = 完成时间 - 到达时间
+    finish: float               # 完成时间
+    waiting: float              # 等待时间
+    turnaround: float           # 周转时间
+    weighted_turnaround: float  # 带权周转时间
 
 
 @dataclass
@@ -57,6 +71,7 @@ class SimulationResult:
     results: list = field(default_factory=list)    # 各进程统计（按添加顺序）
     avg_waiting: float = 0.0          # 平均等待时间
     avg_turnaround: float = 0.0       # 平均周转时间
+    avg_weighted_turnaround: float = 0.0   # 平均带权周转时间
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +83,9 @@ def fcfs(processes):
 
     到达时间相同时按添加顺序执行（稳定排序）。
     """
+    if not processes:
+        return _empty_result("FCFS")   # 空列表优雅返回，不崩溃
+    _validate_processes(processes)
     segments, finish = _non_preemptive_simulate(
         processes, key=lambda p: (p.arrival, p.index))
     return _build_result("FCFS", processes, segments, finish)
@@ -78,6 +96,9 @@ def sjf(processes):
 
     服务时间相同时，先比较到达时间，再比较添加顺序。
     """
+    if not processes:
+        return _empty_result("SJF")
+    _validate_processes(processes)
     segments, finish = _non_preemptive_simulate(
         processes, key=lambda p: (p.service, p.arrival, p.index))
     return _build_result("SJF", processes, segments, finish)
@@ -88,10 +109,40 @@ def rr(processes, quantum):
 
     时间片用完仍未完成的进程排到就绪队列队尾。
     """
+    if not processes:
+        return _empty_result("RR")
+    _validate_processes(processes)
     if quantum <= 0:
-        raise ValueError("时间片必须为正数")
+        raise ValueError("时间片必须大于 0！")
     segments, finish = _rr_simulate(processes, quantum)
     return _build_result("RR", processes, segments, finish)
+
+
+# ---------------------------------------------------------------------------
+# 输入健壮性校验
+# ---------------------------------------------------------------------------
+
+def _validate_processes(processes):
+    """在算法层拦截非法输入，抛出明确的中文错误提示。
+
+    校验规则（前端可直接捕获 ValueError 并弹窗展示）：
+    1. 到达时间不能小于 0 —— 时间轴从 0 开始，负到达时间没有物理意义；
+    2. 服务时间必须大于 0 —— 服务时间为 0 或负数的进程没有工作量，无法参与调度。
+    """
+    for p in processes:
+        if p.arrival < 0:
+            raise ValueError(f"进程 {p.pid} 的到达时间不能小于 0！")
+        if p.service <= 0:
+            raise ValueError(f"进程 {p.pid} 的服务时间必须大于 0！")
+
+
+def _empty_result(algorithm):
+    """进程列表为空时的优雅返回：返回一个全空结果，不引发任何异常。
+
+    total_time 为 0、segments/results 为空列表、各平均值均为 0，
+    界面拿到这个结果后只需正常渲染（甘特图为空、结果表为空）即可。
+    """
+    return SimulationResult(algorithm=algorithm, total_time=0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +201,18 @@ def _rr_simulate(processes, quantum):
     就绪队列是一个先进先出（FIFO）队列，入队时机有两处，都不能漏：
     1. 开始/空闲期间：到达时间 <= 当前时刻的进程按到达顺序入队；
     2. 某进程正在执行期间：新到达的进程也要按到达顺序入队。
-    时间片用完但仍未完成的进程，重新排到队尾。
+
+    时间片耗尽与重排队尾的规则（教材约定，逐条推演）：
+    - 进程执行 min(时间片, 剩余服务时间) 后：
+        a) 剩余服务时间 > 0：说明时间片耗尽但进程未完成，
+           必须把它重新插到就绪队列的【队尾】，等待下一轮；
+        b) 剩余服务时间 == 0：进程完成，记录完成时刻，不再入队。
+    - "新进程到达"与"时间片耗尽"发生在同一时刻（到达时间 == 当前时刻）时：
+        规定【新到达的进程优先入队，当前进程随后排到队尾】。
+        即先执行"入队时机 2"把新进程按到达顺序追加进队列，
+        再判断当前进程是否未完成、若未完成则追加到队尾。
+        这样新进程在下一轮会比被抢占的进程更早获得 CPU，
+        与主流操作系统实现（新进程排在被打断进程之前）保持一致。
     """
     pending = sorted(processes, key=lambda p: (p.arrival, p.index))
     ready = deque()                # FIFO 就绪队列
@@ -182,26 +244,38 @@ def _rr_simulate(processes, quantum):
         t += run
         remaining[p.pid] -= run
 
-        # 入队时机 2：该进程执行期间新到达的进程也要按到达顺序入队
+        # 入队时机 2：该进程执行期间新到达的进程也要按到达顺序入队。
+        # 注意：这一步先于"当前进程重回队尾"执行——
+        # 若某进程恰好在时间片耗尽的同一时刻到达（arrival == t），
+        # 它会被优先入队，排在被打断的当前进程之前（见函数说明）。
         while i < n and pending[i].arrival <= t + 1e-9:
             ready.append(pending[i])
             i += 1
 
         if remaining[p.pid] > 1e-9:
-            ready.append(p)        # 时间片耗尽仍未完成：排到队尾
+            # 时间片耗尽但未完成：重新排到队尾，等待下一轮
+            ready.append(p)
         else:
-            finish[p.pid] = t      # 执行完毕，记录完成时刻
+            # 执行完毕，记录完成时刻
+            finish[p.pid] = t
             done += 1
 
     return segments, finish
 
 
 # ---------------------------------------------------------------------------
-# 结果整理
+# 结果整理与指标计算
 # ---------------------------------------------------------------------------
 
 def _build_result(algorithm, processes, segments, finish):
-    """把模拟出的时间段与完成时刻整理成 SimulationResult。"""
+    """把模拟出的时间段与完成时刻整理成 SimulationResult。
+
+    指标计算推演（对每个进程）：
+        完成时间       finish = 该进程最后一次执行结束的时刻
+        周转时间       turnaround = finish - arrival
+        带权周转时间   weighted = turnaround / service
+        等待时间       waiting = turnaround - service
+    """
     # 合并相邻的同一进程时间段（RR 中同一进程可能连续两次被轮转到），
     # 只影响甘特图显示，不影响统计数据。
     merged = []
@@ -214,10 +288,13 @@ def _build_result(algorithm, processes, segments, finish):
     results = []
     for p in processes:            # 保持添加顺序输出
         f = finish[p.pid]
-        waiting = f - p.arrival - p.service   # 等待 = 完成 - 到达 - 服务
+        turnaround = f - p.arrival                  # 周转 = 完成 - 到达
+        weighted = turnaround / p.service           # 带权周转 = 周转 / 服务
+        waiting = turnaround - p.service            # 等待 = 周转 - 服务
         results.append(ProcessResult(
             pid=p.pid, arrival=p.arrival, service=p.service,
-            finish=f, waiting=waiting, turnaround=f - p.arrival))
+            finish=f, waiting=waiting,
+            turnaround=turnaround, weighted_turnaround=weighted))
 
     n = len(results)
     return SimulationResult(
@@ -227,4 +304,5 @@ def _build_result(algorithm, processes, segments, finish):
         results=results,
         avg_waiting=sum(r.waiting for r in results) / n,
         avg_turnaround=sum(r.turnaround for r in results) / n,
+        avg_weighted_turnaround=sum(r.weighted_turnaround for r in results) / n,
     )
