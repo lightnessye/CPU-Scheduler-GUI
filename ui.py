@@ -16,6 +16,13 @@ COLORS = [
     "#76B7B2", "#EDC948", "#FF9DA7", "#9C755F", "#BAB0AC",
 ]
 
+# 算法下拉框选项：(显示文字, 传给 scheduler 的算法 key, 是否需要时间片)
+ALGORITHMS = (
+    ("FCFS（先来先服务）", "FCFS", False),
+    ("SJF（短作业优先·非抢占）", "SJF", False),
+    ("RR（时间片轮转）", "RR", True),
+)
+
 # 甘特图画布的固定尺寸与布局参数（配合 900x650 的窗口）
 CANVAS_WIDTH = 860
 CANVAS_HEIGHT = 195
@@ -41,7 +48,7 @@ class SchedulerApp:
         self._seq = 0              # 自增序号，保证行号和排序稳定键唯一
         self.pid_color = {}        # pid -> 甘特图颜色
         self._color_i = 0          # 下一个使用的调色板下标
-        self.algorithm = tk.StringVar(value="FCFS")    # 当前选中的算法
+        self.algorithm = tk.StringVar(value=ALGORITHMS[0][0])  # 下拉框当前显示的文字
         self.quantum_var = tk.StringVar(value="2")     # RR 时间片（默认 2）
         self.sim_result = None     # 最近一次模拟的结果
 
@@ -102,25 +109,27 @@ class SchedulerApp:
                   command=self.delete_process).pack(side="left", padx=(6, 0), anchor="n")
 
     def _build_algorithm_area(self):
-        """算法选择区：三个单选按钮，选中 RR 时才显示时间片输入框。"""
+        """算法选择区：下拉框选择调度算法，选中 RR 时才显示时间片输入框。"""
         frame = tk.LabelFrame(self.root, text="算法选择")
         frame.pack(side="top", fill="x", padx=10, pady=2)
 
-        tk.Radiobutton(frame, text="FCFS（先来先服务）", variable=self.algorithm,
-                       value="FCFS", command=self._on_algorithm_change
-                       ).grid(row=0, column=0, padx=(10, 6), pady=5, sticky="w")
-        tk.Radiobutton(frame, text="SJF（短作业优先，非抢占）", variable=self.algorithm,
-                       value="SJF", command=self._on_algorithm_change
-                       ).grid(row=0, column=1, padx=6, pady=5, sticky="w")
-        tk.Radiobutton(frame, text="RR（时间片轮转）", variable=self.algorithm,
-                       value="RR", command=self._on_algorithm_change
-                       ).grid(row=0, column=2, padx=6, pady=5, sticky="w")
+        tk.Label(frame, text="调度算法：").grid(row=0, column=0, padx=(10, 4), pady=6)
+        self.algo_combo = ttk.Combobox(
+            frame,
+            values=[item[0] for item in ALGORITHMS],
+            textvariable=self.algorithm,
+            state="readonly",           # 只能从列表里选，避免输入非法算法名
+            width=26,
+        )
+        self.algo_combo.grid(row=0, column=1, padx=4, pady=6)
+        self.algo_combo.current(0)      # 默认选中第一项 FCFS
+        self.algo_combo.bind("<<ComboboxSelected>>", self._on_algorithm_change)
 
-        # 时间片输入框：仅 RR 选中时显示（初始隐藏）
+        # 时间片输入框：仅 RR 选中时显示（初始隐藏，因为默认 FCFS）
         self.quantum_label = tk.Label(frame, text="时间片：")
-        self.quantum_label.grid(row=0, column=3, padx=(16, 2))
+        self.quantum_label.grid(row=0, column=2, padx=(16, 2))
         self.quantum_entry = tk.Entry(frame, width=6, textvariable=self.quantum_var)
-        self.quantum_entry.grid(row=0, column=4, padx=2)
+        self.quantum_entry.grid(row=0, column=3, padx=2)
         self.quantum_label.grid_remove()
         self.quantum_entry.grid_remove()
 
@@ -228,9 +237,18 @@ class SchedulerApp:
             self.process_tree.delete(iid)
         self._clear_outputs()
 
-    def _on_algorithm_change(self):
+    def _current_algorithm(self):
+        """返回 (算法 key, 是否需要时间片)，由下拉框当前显示文字映射得到。"""
+        display = self.algorithm.get()
+        for label, key, need_quantum in ALGORITHMS:
+            if label == display:
+                return key, need_quantum
+        return "FCFS", False
+
+    def _on_algorithm_change(self, event=None):
         """切换算法：只有 RR 需要时间片，选中 RR 时才显示时间片输入框。"""
-        if self.algorithm.get() == "RR":
+        _, need_quantum = self._current_algorithm()
+        if need_quantum:
             self.quantum_label.grid()
             self.quantum_entry.grid()
         else:
@@ -243,7 +261,7 @@ class SchedulerApp:
             messagebox.showwarning("提示", "请先添加至少一个进程！")
             return
 
-        algo = self.algorithm.get()
+        algo, _ = self._current_algorithm()
         if algo == "FCFS":
             result = scheduler.fcfs(self.processes)
         elif algo == "SJF":
@@ -274,6 +292,8 @@ class SchedulerApp:
         self.arrival_entry.delete(0, "end")
         self.service_entry.delete(0, "end")
         self.quantum_var.set("2")
+        self.algo_combo.current(0)     # 算法恢复默认 FCFS
+        self._on_algorithm_change()    # 同步隐藏时间片输入框
         self._clear_outputs()
 
     def _clear_outputs(self):
