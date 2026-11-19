@@ -174,7 +174,7 @@ class SchedulerApp:
     def _center_window(self):
         """把 900x650 的窗口放到屏幕中央。"""
         self.root.update_idletasks()
-        w, h = 900, 650
+        w, h = 1100, 800
         x = (self.root.winfo_screenwidth() - w) // 2
         y = (self.root.winfo_screenheight() - h) // 2
         self.root.geometry(f"{w}x{h}+{x}+{y}")
