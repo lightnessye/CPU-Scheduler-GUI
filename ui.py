@@ -694,8 +694,6 @@ class SchedulerApp:
         self.process_tree.insert("", "end", iid=iid,
                                  values=(pid, f"{arrival:g}", f"{service:g}"),
                                  tags=row_tag)
-        # 清空输入框，便于连续录入
-                                 values=(pid, f"{arrival:g}", f"{service:g}"))
 
         # ---- 添加成功后自动清空三个输入框，方便连续录入下一个进程 ----
         self.pid_entry.delete(0, "end")
